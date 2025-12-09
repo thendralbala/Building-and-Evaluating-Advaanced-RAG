@@ -1,0 +1,10 @@
+# Ignore virtual environments
+learn-dlai-env/
+venv/
+env/
+
+# Ignore cache and temporary files
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+.env
