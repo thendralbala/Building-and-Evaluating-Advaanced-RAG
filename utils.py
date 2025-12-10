@@ -1,34 +1,43 @@
-#!pip install python-dotenv
-
-
 import os
+import numpy as np
+import nest_asyncio
 from dotenv import load_dotenv, find_dotenv
 
-import numpy as np
-from trulens_eval import (
-    Feedback,
-    TruLlama,
-    OpenAI
+# --- TruLens Imports (Legacy v0.19.2) ---
+from trulens_eval import Feedback, TruLlama, OpenAI as TruOpenAI
+from trulens_eval.feedback import Groundedness
+
+# --- LlamaIndex Imports (Legacy v0.9.48) ---
+# Note: In v0.9, everything is in the top-level package
+from llama_index import (
+    VectorStoreIndex,
+    ServiceContext,
+    StorageContext,
+    load_index_from_storage,
+    SimpleDirectoryReader,
 )
-
-
-import nest_asyncio
+from llama_index.node_parser import (
+    SentenceWindowNodeParser,
+    HierarchicalNodeParser,
+    get_leaf_nodes,
+)
+from llama_index.indices.postprocessor import MetadataReplacementPostProcessor
+from llama_index.indices.postprocessor import SentenceTransformerRerank
+from llama_index.retrievers import AutoMergingRetriever
+from llama_index.query_engine import RetrieverQueryEngine
 
 nest_asyncio.apply()
 
-
 def get_openai_api_key():
     _ = load_dotenv(find_dotenv())
-
     return os.getenv("OPENAI_API_KEY")
-
 
 def get_hf_api_key():
     _ = load_dotenv(find_dotenv())
-
     return os.getenv("HUGGINGFACE_API_KEY")
 
-openai = OpenAI()
+# --- TruLens Setup ---
+openai = TruOpenAI()
 
 qa_relevance = (
     Feedback(openai.relevance_with_cot_reasons, name="Answer Relevance")
@@ -36,20 +45,20 @@ qa_relevance = (
 )
 
 qs_relevance = (
-    Feedback(openai.relevance_with_cot_reasons, name = "Context Relevance")
+    Feedback(openai.relevance_with_cot_reasons, name="Context Relevance")
     .on_input()
     .on(TruLlama.select_source_nodes().node.text)
     .aggregate(np.mean)
 )
 
-#grounded = Groundedness(groundedness_provider=openai, summarize_provider=openai)
+# Groundedness setup for v0.19.2
 grounded = Groundedness(groundedness_provider=openai)
 
 groundedness = (
     Feedback(grounded.groundedness_measure_with_cot_reasons, name="Groundedness")
-        .on(TruLlama.select_source_nodes().node.text)
-        .on_output()
-        .aggregate(grounded.grounded_statements_aggregator)
+    .on(TruLlama.select_source_nodes().node.text)
+    .on_output()
+    .aggregate(grounded.grounded_statements_aggregator)
 )
 
 feedbacks = [qa_relevance, qs_relevance, groundedness]
@@ -67,31 +76,27 @@ def get_prebuilt_trulens_recorder(query_engine, app_id):
         query_engine,
         app_id=app_id,
         feedbacks=feedbacks
-        )
+    )
     return tru_recorder
 
-from llama_index import ServiceContext, VectorStoreIndex, StorageContext
-from llama_index.node_parser import SentenceWindowNodeParser
-from llama_index.indices.postprocessor import MetadataReplacementPostProcessor
-from llama_index.indices.postprocessor import SentenceTransformerRerank
-from llama_index import load_index_from_storage
-import os
-
+# --- LlamaIndex Functions ---
 
 def build_sentence_window_index(
     document, llm, embed_model="local:BAAI/bge-small-en-v1.5", save_dir="sentence_index"
 ):
-    # create the sentence window node parser w/ default settings
     node_parser = SentenceWindowNodeParser.from_defaults(
         window_size=3,
         window_metadata_key="window",
         original_text_metadata_key="original_text",
     )
+    
+    # In v0.9, ServiceContext is mandatory
     sentence_context = ServiceContext.from_defaults(
         llm=llm,
         embed_model=embed_model,
         node_parser=node_parser,
     )
+
     if not os.path.exists(save_dir):
         sentence_index = VectorStoreIndex.from_documents(
             [document], service_context=sentence_context
@@ -105,13 +110,11 @@ def build_sentence_window_index(
 
     return sentence_index
 
-
 def get_sentence_window_query_engine(
     sentence_index,
     similarity_top_k=6,
     rerank_top_n=2,
 ):
-    # define postprocessors
     postproc = MetadataReplacementPostProcessor(target_metadata_key="window")
     rerank = SentenceTransformerRerank(
         top_n=rerank_top_n, model="BAAI/bge-reranker-base"
@@ -121,16 +124,6 @@ def get_sentence_window_query_engine(
         similarity_top_k=similarity_top_k, node_postprocessors=[postproc, rerank]
     )
     return sentence_window_engine
-
-
-from llama_index.node_parser import HierarchicalNodeParser
-
-from llama_index.node_parser import get_leaf_nodes
-from llama_index import StorageContext
-from llama_index.retrievers import AutoMergingRetriever
-from llama_index.indices.postprocessor import SentenceTransformerRerank
-from llama_index.query_engine import RetrieverQueryEngine
-
 
 def build_automerging_index(
     documents,
@@ -143,6 +136,7 @@ def build_automerging_index(
     node_parser = HierarchicalNodeParser.from_defaults(chunk_sizes=chunk_sizes)
     nodes = node_parser.get_nodes_from_documents(documents)
     leaf_nodes = get_leaf_nodes(nodes)
+    
     merging_context = ServiceContext.from_defaults(
         llm=llm,
         embed_model=embed_model,
@@ -161,7 +155,6 @@ def build_automerging_index(
             service_context=merging_context,
         )
     return automerging_index
-
 
 def get_automerging_query_engine(
     automerging_index,
